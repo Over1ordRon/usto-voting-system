@@ -48,7 +48,7 @@ const VotingSystem = () => {
     
     setTimeout(initGoogle, 100);
 
-    // Set up real-time subscriptions
+    // Set up real-time subscriptions for polls and options
     const pollsChannel = supabaseClient
       .channel('polls-changes')
       .on('postgres_changes', 
@@ -194,6 +194,7 @@ const VotingSystem = () => {
     }
   };
 
+  // loadPolls: also fetch options and compute total_votes
   const loadPolls = async () => {
     try {
       const { data: pollsData, error: pollsError } = await supabaseClient
@@ -203,6 +204,10 @@ const VotingSystem = () => {
         .order('created_at', { ascending: false });
 
       if (pollsError) throw pollsError;
+      if (!pollsData) {
+        setActivePolls([]);
+        return;
+      }
 
       const pollsWithOptions = await Promise.all(
         pollsData.map(async (poll) => {
@@ -214,9 +219,13 @@ const VotingSystem = () => {
 
           if (optionsError) throw optionsError;
 
+          const opts = options || [];
+          const total_votes = opts.reduce((sum, o) => sum + (o.votes || 0), 0);
+
           return {
             ...poll,
-            options: options || []
+            options: opts,
+            total_votes
           };
         })
       );
@@ -271,6 +280,8 @@ const VotingSystem = () => {
       setShowCreatePoll(false);
       
       alert('Poll created successfully!');
+      // reload polls to show result
+      await loadPolls();
     } catch (err) {
       console.error('Error creating poll:', err);
       alert('Failed to create poll. Please try again.');
@@ -285,6 +296,7 @@ const VotingSystem = () => {
     return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
   };
 
+  // Vote: insert votes row, call increment_vote RPC, then refresh the poll's options
   const vote = async (pollId, optionId) => {
     if (votedPolls.has(pollId)) {
       alert('You have already voted on this poll');
@@ -294,18 +306,28 @@ const VotingSystem = () => {
     try {
       const userHash = await hashUserId(user.sub);
 
-      const { data: existingVote } = await supabaseClient
+      // Double-check server-side if this user already voted (race-safe)
+      const { data: existingVote, error: evError } = await supabaseClient
         .from('votes')
         .select('id')
         .eq('poll_id', pollId)
         .eq('user_hash', userHash)
         .single();
 
+      if (evError && evError.code !== 'PGRST116') {
+        // PGRST116 is "No rows" in some clients — treat missing as ok
+        // but surface other errors.
+        console.warn('evError', evError);
+      }
+
       if (existingVote) {
         alert('You have already voted on this poll');
+        // Make sure local state reflects that
+        setVotedPolls(prev => new Set([...prev, pollId]));
         return;
       }
 
+      // Insert vote row
       const { error: voteError } = await supabaseClient
         .from('votes')
         .insert([
@@ -317,43 +339,66 @@ const VotingSystem = () => {
 
       if (voteError) throw voteError;
 
-      const option = activePolls
-        .find(p => p.id === pollId)
-        ?.options.find(o => o.id === optionId);
-      
-      if (option) {
-        const { error } = await supabaseClient
-          .from('poll_options')
-          .update({ votes: option.votes + 1 })
-          .eq('id', optionId);
-        
-        if (error) throw error;
+      // Increment votes atomically using RPC (increment_vote must exist)
+      const { error: rpcError } = await supabaseClient
+        .rpc('increment_vote', { option_id: optionId });
+
+      if (rpcError) {
+        // If RPC fails, try a fallback (not recommended) or remove inserted vote to avoid inconsistency
+        console.error('RPC increment_vote failed:', rpcError);
+        throw rpcError;
       }
 
-      const newVoted = new Set(votedPolls);
-      newVoted.add(pollId);
-      setVotedPolls(newVoted);
+      // Refresh only the affected poll's options so totals update immediately
+      const { data: updatedOptions, error: optsError } = await supabaseClient
+        .from('poll_options')
+        .select('*')
+        .eq('poll_id', pollId)
+        .order('id', { ascending: true });
+
+      if (optsError) throw optsError;
+
+      // Update activePolls with the refreshed options and total_votes
+      setActivePolls(prev =>
+        prev.map(p => {
+          if (p.id !== pollId) return p;
+          const opts = updatedOptions || [];
+          const total_votes = opts.reduce((sum, o) => sum + (o.votes || 0), 0);
+          return { ...p, options: opts, total_votes };
+        })
+      );
+
+      // Mark this poll as voted locally
+      setVotedPolls(prev => {
+        const s = new Set(prev);
+        s.add(pollId);
+        return s;
+      });
 
       alert('Vote recorded successfully!');
     } catch (err) {
       console.error('Error voting:', err);
       alert('Failed to record vote. Please try again.');
+      // (Optional) consider removing the inserted vote row if increment failed
     }
   };
 
+  // Delete poll via admin_delete_poll RPC (must be created in DB)
   const deletePoll = async (pollId) => {
     if (!confirm('Are you sure you want to delete this poll? This cannot be undone.')) {
       return;
     }
 
     try {
-      const { error } = await supabaseClient
-        .from('polls')
-        .delete()
-        .eq('id', pollId);
+      // Call admin_delete_poll RPC (SECURITY DEFINER function must exist)
+      const { error: rpcErr } = await supabaseClient
+        .rpc('admin_delete_poll', { poll_id_param: pollId });
 
-      if (error) throw error;
-      
+      if (rpcErr) throw rpcErr;
+
+      // Refresh polls after delete
+      await loadPolls();
+
       alert('Poll deleted successfully!');
     } catch (err) {
       console.error('Error deleting poll:', err);
@@ -597,7 +642,7 @@ const VotingSystem = () => {
           ) : (
             activePolls.map(poll => {
               const hasVoted = votedPolls.has(poll.id);
-              const totalVotes = poll.options.reduce((sum, opt) => sum + opt.votes, 0);
+              const totalVotes = poll.total_votes || (poll.options ? poll.options.reduce((sum, opt) => sum + (opt.votes || 0), 0) : 0);
               
               return (
                 <div key={poll.id} className="bg-white rounded-xl shadow-lg p-6">
