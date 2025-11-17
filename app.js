@@ -1,11 +1,15 @@
-// ============================================ // CONFIGURATION - REPLACE WITH YOUR VALUES // ============================================ 
-const SUPABASE_URL = 'https://erozoxpkxevizzsilazx.supabase.co'; // e.g., 'https://xxxxx.supabase.co' 
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVyb3pveHBreGV2aXp6c2lsYXp4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjMzODMzMzUsImV4cCI6MjA3ODk1OTMzNX0.E6iZBm27I-HyS93obVvGO302KG3Wpf8I4n1_QeRE0yQ'; // Long string starting with 'eyJ...' 
-const GOOGLE_CLIENT_ID = '337975458118-unpg0jnt0jq24h3mlumclknm5dbp09pg.apps.googleusercontent.com'; // Ends with '.apps.googleusercontent.com' 
-// Admin emails who can create/delete polls 
-const adminEmails = [ '232335230820@etu.univ-usto.dz', '232337393613@etu.univ-usto.dz' // Add more admin emails here 
-                     ];
-// Allowed email domain
+// ============================================
+// CONFIGURATION - REPLACE WITH YOUR VALUES
+// ============================================
+const SUPABASE_URL = 'https://erozoxpkxevizzsilazx.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVyb3pveHBreGV2aXp6c2lsYXp4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjMzODMzMzUsImV4cCI6MjA3ODk1OTMzNX0.E6iZBm27I-HyS93obVvGO302KG3Wpf8I4n1_QeRE0yQ';
+const GOOGLE_CLIENT_ID = '337975458118-unpg0jnt0jq24h3mlumclknm5dbp09pg.apps.googleusercontent.com';
+
+const adminEmails = [
+  '232335230820@etu.univ-usto.dz',
+  '232337393613@etu.univ-usto.dz'
+];
+
 const ALLOWED_DOMAIN = '@etu.univ-usto.dz';
 
 // ============================================
@@ -14,7 +18,6 @@ const ALLOWED_DOMAIN = '@etu.univ-usto.dz';
 const { useState, useEffect } = React;
 const { createClient } = supabase;
 
-// Initialize Supabase client
 const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const VotingSystem = () => {
@@ -32,7 +35,6 @@ const VotingSystem = () => {
     checkAuth();
     loadPolls();
     
-    // Initialize Google Sign-In with retry
     const initGoogle = () => {
       if (window.google && window.google.accounts) {
         console.log('Google Sign-In loaded successfully');
@@ -44,8 +46,36 @@ const VotingSystem = () => {
       }
     };
     
-    // Start initialization after a short delay
     setTimeout(initGoogle, 100);
+
+    // Set up real-time subscriptions
+    const pollsChannel = supabaseClient
+      .channel('polls-changes')
+      .on('postgres_changes', 
+        { event: '*', schema: 'public', table: 'polls' },
+        (payload) => {
+          console.log('Polls changed:', payload);
+          loadPolls();
+        }
+      )
+      .subscribe();
+
+    const optionsChannel = supabaseClient
+      .channel('options-changes')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'poll_options' },
+        (payload) => {
+          console.log('Options changed:', payload);
+          loadPolls();
+        }
+      )
+      .subscribe();
+
+    // Clean up subscriptions on unmount
+    return () => {
+      supabaseClient.removeChannel(pollsChannel);
+      supabaseClient.removeChannel(optionsChannel);
+    };
   }, []);
 
   const initializeGoogleSignIn = () => {
@@ -72,7 +102,6 @@ const VotingSystem = () => {
       
       console.log('User email:', payload.email);
       
-      // Check if email ends with allowed domain
       if (!payload.email.endsWith(ALLOWED_DOMAIN)) {
         setError(`Only ${ALLOWED_DOMAIN} accounts are allowed`);
         return;
@@ -89,12 +118,10 @@ const VotingSystem = () => {
       setUser(userData);
       localStorage.setItem('user', JSON.stringify(userData));
       
-      // Check if admin
       const isUserAdmin = adminEmails.includes(payload.email);
       setIsAdmin(isUserAdmin);
       console.log('Is admin:', isUserAdmin);
       
-      // Load user's voted polls
       await loadUserVotes(payload.sub);
       
       setError(null);
@@ -128,7 +155,6 @@ const VotingSystem = () => {
           console.log('Prompt notification:', notification);
           if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
             console.log('Prompt was not displayed, reason:', notification.getNotDisplayedReason());
-            // Fallback: show error message
             setError('Please allow popups and ensure third-party cookies are enabled');
           }
         });
@@ -170,7 +196,6 @@ const VotingSystem = () => {
 
   const loadPolls = async () => {
     try {
-      // Load active polls
       const { data: pollsData, error: pollsError } = await supabaseClient
         .from('polls')
         .select('*')
@@ -179,7 +204,6 @@ const VotingSystem = () => {
 
       if (pollsError) throw pollsError;
 
-      // Load options for each poll
       const pollsWithOptions = await Promise.all(
         pollsData.map(async (poll) => {
           const { data: options, error: optionsError } = await supabaseClient
@@ -217,7 +241,6 @@ const VotingSystem = () => {
     }
 
     try {
-      // Insert poll
       const { data: pollData, error: pollError } = await supabaseClient
         .from('polls')
         .insert([
@@ -232,7 +255,6 @@ const VotingSystem = () => {
 
       if (pollError) throw pollError;
 
-      // Insert options
       const optionsToInsert = validOptions.map(text => ({
         poll_id: pollData.id,
         text: text,
@@ -245,10 +267,6 @@ const VotingSystem = () => {
 
       if (optionsError) throw optionsError;
 
-      // Reload polls
-      await loadPolls();
-      
-      // Reset form
       setNewPoll({ question: '', options: ['', ''] });
       setShowCreatePoll(false);
       
@@ -276,7 +294,6 @@ const VotingSystem = () => {
     try {
       const userHash = await hashUserId(user.sub);
 
-      // Check if already voted (double-check)
       const { data: existingVote } = await supabaseClient
         .from('votes')
         .select('id')
@@ -289,7 +306,6 @@ const VotingSystem = () => {
         return;
       }
 
-      // Record vote
       const { error: voteError } = await supabaseClient
         .from('votes')
         .insert([
@@ -301,7 +317,6 @@ const VotingSystem = () => {
 
       if (voteError) throw voteError;
 
-      // Increment vote count
       const option = activePolls
         .find(p => p.id === pollId)
         ?.options.find(o => o.id === optionId);
@@ -315,13 +330,9 @@ const VotingSystem = () => {
         if (error) throw error;
       }
 
-      // Update local state
       const newVoted = new Set(votedPolls);
       newVoted.add(pollId);
       setVotedPolls(newVoted);
-
-      // Reload polls to show updated counts
-      await loadPolls();
 
       alert('Vote recorded successfully!');
     } catch (err) {
@@ -342,8 +353,6 @@ const VotingSystem = () => {
         .eq('id', pollId);
 
       if (error) throw error;
-
-      setActivePolls(activePolls.filter(poll => poll.id !== pollId));
       
       alert('Poll deleted successfully!');
     } catch (err) {
@@ -663,5 +672,4 @@ const VotingSystem = () => {
   );
 };
 
-// Render the application
 ReactDOM.render(<VotingSystem />, document.getElementById('root'));
