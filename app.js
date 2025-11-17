@@ -1,3 +1,6 @@
+import React, { useState, useEffect } from 'react';
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.3/+esm';
+
 // ============================================
 // CONFIGURATION - REPLACE WITH YOUR VALUES
 // ============================================
@@ -12,15 +15,9 @@ const adminEmails = [
 
 const ALLOWED_DOMAIN = '@etu.univ-usto.dz';
 
-// ============================================
-// APPLICATION CODE
-// ============================================
-const { useState, useEffect } = React;
-const { createClient } = supabase;
-
 const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-const VotingSystem = () => {
+export default function VotingSystem() {
   const [user, setUser] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [activePolls, setActivePolls] = useState([]);
@@ -48,7 +45,6 @@ const VotingSystem = () => {
     
     setTimeout(initGoogle, 100);
 
-    // Set up real-time subscriptions
     const pollsChannel = supabaseClient
       .channel('polls-changes')
       .on('postgres_changes', 
@@ -71,7 +67,6 @@ const VotingSystem = () => {
       )
       .subscribe();
 
-    // Clean up subscriptions on unmount
     return () => {
       supabaseClient.removeChannel(pollsChannel);
       supabaseClient.removeChannel(optionsChannel);
@@ -86,7 +81,6 @@ const VotingSystem = () => {
         auto_select: false,
         cancel_on_tap_outside: true
       });
-      
       console.log('Google Sign-In initialized');
     } catch (err) {
       console.error('Error initializing Google Sign-In:', err);
@@ -241,6 +235,17 @@ const VotingSystem = () => {
     }
 
     try {
+      // First, sign in with Google token to set user session
+      const { data: { session }, error: authError } = await supabaseClient.auth.signInWithIdToken({
+        provider: 'google',
+        token: user.token
+      });
+
+      if (authError) {
+        console.error('Auth error:', authError);
+        throw authError;
+      }
+
       const { data: pollData, error: pollError } = await supabaseClient
         .from('polls')
         .insert([
@@ -271,9 +276,10 @@ const VotingSystem = () => {
       setShowCreatePoll(false);
       
       alert('Poll created successfully!');
+      await loadPolls();
     } catch (err) {
       console.error('Error creating poll:', err);
-      alert('Failed to create poll. Please try again.');
+      alert(`Failed to create poll: ${err.message}`);
     }
   };
 
@@ -294,18 +300,21 @@ const VotingSystem = () => {
     try {
       const userHash = await hashUserId(user.sub);
 
+      // Check if already voted
       const { data: existingVote } = await supabaseClient
         .from('votes')
         .select('id')
         .eq('poll_id', pollId)
         .eq('user_hash', userHash)
-        .single();
+        .maybeSingle();
 
       if (existingVote) {
         alert('You have already voted on this poll');
+        setVotedPolls(prev => new Set(prev).add(pollId));
         return;
       }
 
+      // Record the vote
       const { error: voteError } = await supabaseClient
         .from('votes')
         .insert([
@@ -315,29 +324,34 @@ const VotingSystem = () => {
           }
         ]);
 
-      if (voteError) throw voteError;
-
-      const option = activePolls
-        .find(p => p.id === pollId)
-        ?.options.find(o => o.id === optionId);
-      
-      if (option) {
-        const { error } = await supabaseClient
-          .from('poll_options')
-          .update({ votes: option.votes + 1 })
-          .eq('id', optionId);
-        
-        if (error) throw error;
+      if (voteError) {
+        console.error('Vote error:', voteError);
+        throw voteError;
       }
 
-      const newVoted = new Set(votedPolls);
-      newVoted.add(pollId);
-      setVotedPolls(newVoted);
+      // Increment vote count using RPC function
+      const { error: incrementError } = await supabaseClient
+        .rpc('increment_vote', { option_id: optionId });
 
+      if (incrementError) {
+        console.error('Increment error:', incrementError);
+        throw incrementError;
+      }
+
+      // Update local state
+      setVotedPolls(prev => {
+        const newSet = new Set(prev);
+        newSet.add(pollId);
+        return newSet;
+      });
+
+      // Reload polls to get updated counts
+      await loadPolls();
+      
       alert('Vote recorded successfully!');
     } catch (err) {
       console.error('Error voting:', err);
-      alert('Failed to record vote. Please try again.');
+      alert(`Failed to record vote: ${err.message}`);
     }
   };
 
@@ -347,17 +361,53 @@ const VotingSystem = () => {
     }
 
     try {
-      const { error } = await supabaseClient
+      // Sign in with Google token to authenticate
+      const { data: { session }, error: authError } = await supabaseClient.auth.signInWithIdToken({
+        provider: 'google',
+        token: user.token
+      });
+
+      if (authError) {
+        console.error('Auth error:', authError);
+        throw authError;
+      }
+
+      // Delete poll options first (cascade should handle this, but being explicit)
+      const { error: optionsError } = await supabaseClient
+        .from('poll_options')
+        .delete()
+        .eq('poll_id', pollId);
+
+      if (optionsError) {
+        console.error('Options delete error:', optionsError);
+      }
+
+      // Delete votes
+      const { error: votesError } = await supabaseClient
+        .from('votes')
+        .delete()
+        .eq('poll_id', pollId);
+
+      if (votesError) {
+        console.error('Votes delete error:', votesError);
+      }
+
+      // Delete the poll
+      const { error: pollError } = await supabaseClient
         .from('polls')
         .delete()
         .eq('id', pollId);
 
-      if (error) throw error;
+      if (pollError) {
+        console.error('Poll delete error:', pollError);
+        throw pollError;
+      }
       
       alert('Poll deleted successfully!');
+      await loadPolls();
     } catch (err) {
       console.error('Error deleting poll:', err);
-      alert('Failed to delete poll. Please try again.');
+      alert(`Failed to delete poll: ${err.message}`);
     }
   };
 
@@ -670,6 +720,4 @@ const VotingSystem = () => {
       </main>
     </div>
   );
-};
-
-ReactDOM.render(<VotingSystem />, document.getElementById('root'));
+}
