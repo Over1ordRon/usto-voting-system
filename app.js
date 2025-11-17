@@ -3,7 +3,8 @@ const SUPABASE_URL = 'https://erozoxpkxevizzsilazx.supabase.co'; // e.g., 'https
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVyb3pveHBreGV2aXp6c2lsYXp4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjMzODMzMzUsImV4cCI6MjA3ODk1OTMzNX0.E6iZBm27I-HyS93obVvGO302KG3Wpf8I4n1_QeRE0yQ'; // Long string starting with 'eyJ...' 
 const GOOGLE_CLIENT_ID = '337975458118-unpg0jnt0jq24h3mlumclknm5dbp09pg.apps.googleusercontent.com'; // Ends with '.apps.googleusercontent.com' 
 // Admin emails who can create/delete polls 
-const adminEmails = [ '232335230820@etu.univ-usto.dz', '232337393613@etu.univ-usto.dz' // Add more admin emails here ];
+const adminEmails = [ '232335230820@etu.univ-usto.dz', '232337393613@etu.univ-usto.dz' // Add more admin emails here 
+                     ];
 // Allowed email domain
 const ALLOWED_DOMAIN = '@etu.univ-usto.dz';
 
