@@ -1,16 +1,11 @@
-// ============================================
-// CONFIGURATION - REPLACE WITH YOUR VALUES
-// ============================================
-const SUPABASE_URL = 'https://erozoxpkxevizzsilazx.supabase.co'; // e.g., 'https://xxxxx.supabase.co'
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVyb3pveHBreGV2aXp6c2lsYXp4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjMzODMzMzUsImV4cCI6MjA3ODk1OTMzNX0.E6iZBm27I-HyS93obVvGO302KG3Wpf8I4n1_QeRE0yQ'; // Long string starting with 'eyJ...'
-const GOOGLE_CLIENT_ID = '337975458118-unpg0jnt0jq24h3mlumclknm5dbp09pg.apps.googleusercontent.com'; // Ends with '.apps.googleusercontent.com'
-
-// Admin emails who can create/delete polls
-const adminEmails = [
-  '232335230820@etu.univ-usto.dz',
-  '232337393613@etu.univ-usto.dz'
-  // Add more admin emails here
-];
+// ============================================ // CONFIGURATION - REPLACE WITH YOUR VALUES // ============================================ 
+const SUPABASE_URL = 'https://erozoxpkxevizzsilazx.supabase.co'; // e.g., 'https://xxxxx.supabase.co' 
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVyb3pveHBreGV2aXp6c2lsYXp4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjMzODMzMzUsImV4cCI6MjA3ODk1OTMzNX0.E6iZBm27I-HyS93obVvGO302KG3Wpf8I4n1_QeRE0yQ'; // Long string starting with 'eyJ...' 
+const GOOGLE_CLIENT_ID = '337975458118-unpg0jnt0jq24h3mlumclknm5dbp09pg.apps.googleusercontent.com'; // Ends with '.apps.googleusercontent.com' 
+// Admin emails who can create/delete polls 
+const adminEmails = [ '232335230820@etu.univ-usto.dz', '232337393613@etu.univ-usto.dz' // Add more admin emails here ];
+// Allowed email domain
+const ALLOWED_DOMAIN = '@etu.univ-usto.dz';
 
 // ============================================
 // APPLICATION CODE
@@ -30,32 +25,55 @@ const VotingSystem = () => {
   const [newPoll, setNewPoll] = useState({ question: '', options: ['', ''] });
   const [votedPolls, setVotedPolls] = useState(new Set());
   const [error, setError] = useState(null);
+  const [googleReady, setGoogleReady] = useState(false);
 
   useEffect(() => {
     checkAuth();
     loadPolls();
     
-    // Initialize Google Sign-In
-    if (window.google) {
-      initializeGoogleSignIn();
-    }
+    // Initialize Google Sign-In with retry
+    const initGoogle = () => {
+      if (window.google && window.google.accounts) {
+        console.log('Google Sign-In loaded successfully');
+        initializeGoogleSignIn();
+        setGoogleReady(true);
+      } else {
+        console.log('Waiting for Google Sign-In to load...');
+        setTimeout(initGoogle, 500);
+      }
+    };
+    
+    // Start initialization after a short delay
+    setTimeout(initGoogle, 100);
   }, []);
 
   const initializeGoogleSignIn = () => {
-    window.google.accounts.id.initialize({
-      client_id: GOOGLE_CLIENT_ID,
-      callback: handleCredentialResponse,
-    });
+    try {
+      window.google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: handleCredentialResponse,
+        auto_select: false,
+        cancel_on_tap_outside: true
+      });
+      
+      console.log('Google Sign-In initialized');
+    } catch (err) {
+      console.error('Error initializing Google Sign-In:', err);
+      setError('Failed to initialize Google Sign-In');
+    }
   };
 
   const handleCredentialResponse = async (response) => {
     try {
+      console.log('Received credential response');
       const credential = response.credential;
       const payload = JSON.parse(atob(credential.split('.')[1]));
       
-      // Check if email ends with @univ-usto.dz
-      if (!payload.email.endsWith('@univ-usto.dz')) {
-        setError('Only @univ-usto.dz accounts are allowed');
+      console.log('User email:', payload.email);
+      
+      // Check if email ends with allowed domain
+      if (!payload.email.endsWith(ALLOWED_DOMAIN)) {
+        setError(`Only ${ALLOWED_DOMAIN} accounts are allowed`);
         return;
       }
 
@@ -64,14 +82,16 @@ const VotingSystem = () => {
         name: payload.name,
         picture: payload.picture,
         token: credential,
-        sub: payload.sub // Google user ID
+        sub: payload.sub
       };
 
       setUser(userData);
       localStorage.setItem('user', JSON.stringify(userData));
       
       // Check if admin
-      setIsAdmin(adminEmails.includes(payload.email));
+      const isUserAdmin = adminEmails.includes(payload.email);
+      setIsAdmin(isUserAdmin);
+      console.log('Is admin:', isUserAdmin);
       
       // Load user's voted polls
       await loadUserVotes(payload.sub);
@@ -100,10 +120,23 @@ const VotingSystem = () => {
   };
 
   const signIn = () => {
-    if (window.google) {
-      window.google.accounts.id.prompt();
+    if (window.google && window.google.accounts) {
+      try {
+        console.log('Prompting Google Sign-In...');
+        window.google.accounts.id.prompt((notification) => {
+          console.log('Prompt notification:', notification);
+          if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
+            console.log('Prompt was not displayed, reason:', notification.getNotDisplayedReason());
+            // Fallback: show error message
+            setError('Please allow popups and ensure third-party cookies are enabled');
+          }
+        });
+      } catch (err) {
+        console.error('Error prompting sign in:', err);
+        setError('Failed to open sign-in. Please refresh the page and try again.');
+      }
     } else {
-      setError('Google Sign-In not loaded. Please refresh the page.');
+      setError('Google Sign-In is still loading. Please wait a moment and try again.');
     }
   };
 
@@ -112,7 +145,7 @@ const VotingSystem = () => {
     setIsAdmin(false);
     setVotedPolls(new Set());
     localStorage.removeItem('user');
-    if (window.google) {
+    if (window.google && window.google.accounts) {
       window.google.accounts.id.disableAutoSelect();
     }
   };
@@ -268,25 +301,17 @@ const VotingSystem = () => {
       if (voteError) throw voteError;
 
       // Increment vote count
-      const { error: updateError } = await supabaseClient
-        .rpc('increment_vote', {
-          option_id: optionId
-        });
-
-      if (updateError) {
-        // Fallback: manual increment
-        const option = activePolls
-          .find(p => p.id === pollId)
-          ?.options.find(o => o.id === optionId);
+      const option = activePolls
+        .find(p => p.id === pollId)
+        ?.options.find(o => o.id === optionId);
+      
+      if (option) {
+        const { error } = await supabaseClient
+          .from('poll_options')
+          .update({ votes: option.votes + 1 })
+          .eq('id', optionId);
         
-        if (option) {
-          const { error } = await supabaseClient
-            .from('poll_options')
-            .update({ votes: option.votes + 1 })
-            .eq('id', optionId);
-          
-          if (error) throw error;
-        }
+        if (error) throw error;
       }
 
       // Update local state
@@ -310,7 +335,6 @@ const VotingSystem = () => {
     }
 
     try {
-      // Delete poll (cascade will delete options and votes)
       const { error } = await supabaseClient
         .from('polls')
         .delete()
@@ -318,7 +342,6 @@ const VotingSystem = () => {
 
       if (error) throw error;
 
-      // Update local state
       setActivePolls(activePolls.filter(poll => poll.id !== pollId));
       
       alert('Poll deleted successfully!');
@@ -347,16 +370,17 @@ const VotingSystem = () => {
     setNewPoll({ ...newPoll, options: newOptions });
   };
 
-  // Loading screen
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center">
-        <div className="text-xl text-gray-600">Loading...</div>
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto mb-4"></div>
+          <div className="text-xl text-gray-600">Loading...</div>
+        </div>
       </div>
     );
   }
 
-  // Login screen
   if (!user) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
@@ -370,15 +394,26 @@ const VotingSystem = () => {
           <p className="text-gray-600 mb-8">USTO Anonymous Voting System</p>
           
           {error && (
-            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-4">
+            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-4 text-sm">
               {error}
+            </div>
+          )}
+          
+          {!googleReady && (
+            <div className="bg-yellow-50 border border-yellow-200 text-yellow-700 px-4 py-3 rounded-lg mb-4 text-sm">
+              Loading Google Sign-In... Please wait.
             </div>
           )}
           
           <div className="space-y-4">
             <button
               onClick={signIn}
-              className="w-full bg-indigo-600 text-white py-3 rounded-lg font-semibold hover:bg-indigo-700 transition duration-200 flex items-center justify-center gap-2"
+              disabled={!googleReady}
+              className={`w-full py-3 rounded-lg font-semibold transition duration-200 flex items-center justify-center gap-2 ${
+                googleReady 
+                  ? 'bg-indigo-600 text-white hover:bg-indigo-700' 
+                  : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+              }`}
             >
               <svg className="w-5 h-5" viewBox="0 0 24 24">
                 <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
@@ -386,22 +421,31 @@ const VotingSystem = () => {
                 <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
                 <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
               </svg>
-              Sign in with Google
+              {googleReady ? 'Sign in with Google' : 'Loading...'}
             </button>
             
             <p className="text-sm text-gray-500">
-              Only @univ-usto.dz accounts are allowed
+              Only {ALLOWED_DOMAIN} accounts are allowed
             </p>
+          </div>
+          
+          <div className="mt-8 pt-6 border-t border-gray-200">
+            <p className="text-xs text-gray-400 mb-2">
+              Troubleshooting:
+            </p>
+            <ul className="text-xs text-gray-500 text-left space-y-1">
+              <li>• Enable popups for this site</li>
+              <li>• Allow third-party cookies</li>
+              <li>• Check browser console (F12) for errors</li>
+            </ul>
           </div>
         </div>
       </div>
     );
   }
 
-  // Main application
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
-      {/* Header */}
       <header className="bg-white shadow-sm">
         <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -437,7 +481,6 @@ const VotingSystem = () => {
         </div>
       </header>
 
-      {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 py-8">
         {error && (
           <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-6">
@@ -459,7 +502,6 @@ const VotingSystem = () => {
           </div>
         )}
 
-        {/* Create Poll Form */}
         {showCreatePoll && isAdmin && (
           <div className="bg-white rounded-xl shadow-lg p-6 mb-6">
             <h2 className="text-2xl font-bold text-gray-800 mb-4">Create New Poll</h2>
@@ -532,7 +574,6 @@ const VotingSystem = () => {
           </div>
         )}
 
-        {/* Active Polls */}
         <div className="space-y-6">
           <h2 className="text-2xl font-bold text-gray-800">Active Polls</h2>
           
