@@ -1,0 +1,377 @@
+-- ============================================
+-- SECURE SUPABASE SQL FUNCTIONS - FIXED
+-- Run this in Supabase SQL Editor after creating tables
+-- All SECURITY DEFINER warnings have been resolved
+-- ============================================
+
+-- ============================================
+-- CORE FUNCTIONS WITH PROPER SECURITY
+-- ============================================
+
+-- Function to increment vote count atomically
+-- Uses SECURITY DEFINER safely with search_path set
+CREATE OR REPLACE FUNCTION increment_vote(option_id BIGINT)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  UPDATE poll_options
+  SET votes = votes + 1
+  WHERE id = option_id;
+END;
+$$;
+
+-- Function to check if user has voted (without exposing user identity)
+-- Uses SECURITY INVOKER to run with caller's privileges
+CREATE OR REPLACE FUNCTION has_user_voted(poll_id_param BIGINT, user_hash_param TEXT)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY INVOKER  -- Changed from DEFINER to INVOKER
+AS $$
+DECLARE
+  vote_exists BOOLEAN;
+BEGIN
+  SELECT EXISTS(
+    SELECT 1
+    FROM votes
+    WHERE poll_id = poll_id_param
+    AND user_hash = user_hash_param
+  ) INTO vote_exists;
+  
+  RETURN vote_exists;
+END;
+$$;
+
+-- Function to get all active polls with their options and vote counts
+-- Uses SECURITY INVOKER to respect RLS policies
+CREATE OR REPLACE FUNCTION get_active_polls()
+RETURNS TABLE (
+  poll_id BIGINT,
+  question TEXT,
+  created_at TIMESTAMP WITH TIME ZONE,
+  option_id BIGINT,
+  option_text TEXT,
+  votes BIGINT
+)
+LANGUAGE plpgsql
+SECURITY INVOKER  -- Changed from DEFINER to INVOKER
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    p.id,
+    p.question,
+    p.created_at,
+    po.id,
+    po.text,
+    po.votes
+  FROM polls p
+  LEFT JOIN poll_options po ON p.id = po.poll_id
+  WHERE p.active = true
+  ORDER BY p.created_at DESC, po.id;
+END;
+$$;
+
+-- Function to get poll results with vote counts
+-- Uses SECURITY INVOKER to respect RLS policies
+CREATE OR REPLACE FUNCTION get_poll_results(poll_id_param BIGINT)
+RETURNS TABLE (
+  option_id BIGINT,
+  option_text TEXT,
+  vote_count BIGINT,
+  percentage NUMERIC
+)
+LANGUAGE plpgsql
+SECURITY INVOKER  -- Changed from DEFINER to INVOKER
+AS $$
+DECLARE
+  total_votes BIGINT;
+BEGIN
+  -- Get total votes for this poll
+  SELECT COALESCE(SUM(votes), 0)
+  INTO total_votes
+  FROM poll_options
+  WHERE poll_id = poll_id_param;
+
+  -- Return results
+  RETURN QUERY
+  SELECT 
+    po.id,
+    po.text,
+    po.votes,
+    CASE 
+      WHEN total_votes > 0 THEN ROUND((po.votes::NUMERIC / total_votes) * 100, 1)
+      ELSE 0
+    END as percentage
+  FROM poll_options po
+  WHERE po.poll_id = poll_id_param
+  ORDER BY po.id;
+END;
+$$;
+
+-- Admin delete function (deletes poll_options, votes and poll)
+-- Uses SECURITY DEFINER with search_path for admin operations
+CREATE OR REPLACE FUNCTION admin_delete_poll(poll_id_param BIGINT)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  -- Only allow admins to delete
+  IF NOT (auth.jwt()->>'email' IN (
+    '232335230820@etu.univ-usto.dz',
+    '232337393613@etu.univ-usto.dz'
+  )) THEN
+    RAISE EXCEPTION 'Permission denied: Admin access required';
+  END IF;
+
+  DELETE FROM poll_options WHERE poll_id = poll_id_param;
+  DELETE FROM votes WHERE poll_id = poll_id_param;
+  DELETE FROM polls WHERE id = poll_id_param;
+END;
+$$;
+
+-- Function to deactivate old polls (can be run manually or scheduled)
+CREATE OR REPLACE FUNCTION deactivate_old_polls(days_old INTEGER DEFAULT 30)
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  affected_rows INTEGER;
+BEGIN
+  -- Only allow admins to deactivate polls
+  IF NOT (auth.jwt()->>'email' IN (
+    '232335230820@etu.univ-usto.dz',
+    '232337393613@etu.univ-usto.dz'
+  )) THEN
+    RAISE EXCEPTION 'Permission denied: Admin access required';
+  END IF;
+
+  UPDATE polls
+  SET active = false
+  WHERE active = true
+  AND created_at < NOW() - (days_old || ' days')::INTERVAL;
+  
+  GET DIAGNOSTICS affected_rows = ROW_COUNT;
+  RETURN affected_rows;
+END;
+$$;
+
+-- ============================================
+-- TRIGGER TO PREVENT DUPLICATE VOTES
+-- ============================================
+
+CREATE OR REPLACE FUNCTION prevent_duplicate_votes()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  -- Check if user has already voted on this poll
+  IF EXISTS (
+    SELECT 1 FROM votes
+    WHERE poll_id = NEW.poll_id
+    AND user_hash = NEW.user_hash
+    AND id != NEW.id
+  ) THEN
+    RAISE EXCEPTION 'User has already voted on this poll';
+  END IF;
+  
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS check_duplicate_votes ON votes;
+CREATE TRIGGER check_duplicate_votes
+  BEFORE INSERT ON votes
+  FOR EACH ROW
+  EXECUTE FUNCTION prevent_duplicate_votes();
+
+-- ============================================
+-- VIEWS FOR ANALYTICS (WITHOUT SECURITY DEFINER)
+-- ============================================
+
+-- Drop the old view if it exists
+DROP VIEW IF EXISTS poll_statistics;
+
+-- Recreate view WITHOUT SECURITY DEFINER (runs with caller's privileges)
+-- This respects RLS and prevents privilege escalation
+CREATE OR REPLACE VIEW poll_statistics AS
+SELECT 
+  p.id as poll_id,
+  p.question,
+  p.created_at,
+  COUNT(DISTINCT v.id) as total_votes,
+  COUNT(DISTINCT po.id) as total_options,
+  p.active
+FROM polls p
+LEFT JOIN poll_options po ON p.id = po.poll_id
+LEFT JOIN votes v ON p.id = v.poll_id
+GROUP BY p.id, p.question, p.created_at, p.active
+ORDER BY p.created_at DESC;
+
+-- Grant access to the view
+GRANT SELECT ON poll_statistics TO authenticated;
+GRANT SELECT ON poll_statistics TO anon;
+
+-- ============================================
+-- ROW LEVEL SECURITY POLICIES
+-- ============================================
+
+-- Enable RLS on all tables (if not already enabled)
+ALTER TABLE polls ENABLE ROW LEVEL SECURITY;
+ALTER TABLE poll_options ENABLE ROW LEVEL SECURITY;
+ALTER TABLE votes ENABLE ROW LEVEL SECURITY;
+
+-- Drop existing policies if they exist
+DROP POLICY IF EXISTS "Everyone can view active polls" ON polls;
+DROP POLICY IF EXISTS "Admins can create polls" ON polls;
+DROP POLICY IF EXISTS "Admins can delete polls" ON polls;
+DROP POLICY IF EXISTS "Admins can update polls" ON polls;
+DROP POLICY IF EXISTS "Everyone can view poll options" ON poll_options;
+DROP POLICY IF EXISTS "Admins can create poll options" ON poll_options;
+DROP POLICY IF EXISTS "Everyone can insert votes" ON votes;
+DROP POLICY IF EXISTS "Everyone can view votes" ON votes;
+
+-- Polls policies
+CREATE POLICY "Everyone can view active polls" ON polls
+  FOR SELECT USING (active = true);
+
+CREATE POLICY "Admins can create polls" ON polls
+  FOR INSERT WITH CHECK (
+    auth.jwt()->>'email' IN (
+      '232335230820@etu.univ-usto.dz',
+      '232337393613@etu.univ-usto.dz'
+    )
+  );
+
+CREATE POLICY "Admins can delete polls" ON polls
+  FOR DELETE USING (
+    auth.jwt()->>'email' IN (
+      '232335230820@etu.univ-usto.dz',
+      '232337393613@etu.univ-usto.dz'
+    )
+  );
+
+CREATE POLICY "Admins can update polls" ON polls
+  FOR UPDATE USING (
+    auth.jwt()->>'email' IN (
+      '232335230820@etu.univ-usto.dz',
+      '232337393613@etu.univ-usto.dz'
+    )
+  );
+
+-- Poll options policies
+CREATE POLICY "Everyone can view poll options" ON poll_options
+  FOR SELECT USING (
+    EXISTS (
+      SELECT 1 FROM polls
+      WHERE polls.id = poll_options.poll_id
+      AND polls.active = true
+    )
+  );
+
+CREATE POLICY "Admins can create poll options" ON poll_options
+  FOR INSERT WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM polls
+      WHERE polls.id = poll_options.poll_id
+      AND polls.created_by = auth.jwt()->>'email'
+      AND polls.created_by IN (
+        '232335230820@etu.univ-usto.dz',
+        '232337393613@etu.univ-usto.dz'
+      )
+    )
+  );
+
+-- Votes policies
+CREATE POLICY "Everyone can insert votes" ON votes
+  FOR INSERT WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM polls
+      WHERE polls.id = votes.poll_id
+      AND polls.active = true
+    )
+  );
+
+CREATE POLICY "Everyone can view votes" ON votes
+  FOR SELECT USING (true);
+
+-- ============================================
+-- INDEXES FOR PERFORMANCE
+-- ============================================
+
+CREATE INDEX IF NOT EXISTS idx_polls_created_at ON polls(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_polls_active ON polls(active);
+CREATE INDEX IF NOT EXISTS idx_votes_voted_at ON votes(voted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_votes_poll_user ON votes(poll_id, user_hash);
+CREATE INDEX IF NOT EXISTS idx_poll_options_poll_id ON poll_options(poll_id);
+
+-- ============================================
+-- VERIFICATION QUERIES
+-- ============================================
+
+-- Run these to verify everything is working:
+
+-- 1. Check that all functions exist and have proper security configuration
+SELECT 
+    routine_name,
+    routine_type,
+    security_type,
+    specific_name
+FROM information_schema.routines
+WHERE routine_schema = 'public'
+AND routine_name IN (
+    'increment_vote',
+    'get_poll_results',
+    'has_user_voted',
+    'get_active_polls',
+    'prevent_duplicate_votes',
+    'deactivate_old_polls',
+    'admin_delete_poll'
+)
+ORDER BY routine_name;
+
+-- 2. Verify triggers are in place
+SELECT 
+    trigger_name,
+    event_manipulation,
+    event_object_table,
+    action_timing
+FROM information_schema.triggers
+WHERE trigger_schema = 'public'
+AND trigger_name = 'check_duplicate_votes';
+
+-- 3. Check indexes
+SELECT 
+    indexname,
+    tablename
+FROM pg_indexes
+WHERE schemaname = 'public'
+AND tablename IN ('polls', 'poll_options', 'votes')
+ORDER BY tablename, indexname;
+
+-- 4. Verify RLS is enabled
+SELECT 
+    tablename,
+    rowsecurity
+FROM pg_tables
+WHERE schemaname = 'public'
+AND tablename IN ('polls', 'poll_options', 'votes');
+
+-- 5. Check all policies
+SELECT 
+    tablename,
+    policyname,
+    permissive,
+    roles,
+    cmd
+FROM pg_policies
+WHERE schemaname = 'public'
+ORDER BY tablename, policyname;
